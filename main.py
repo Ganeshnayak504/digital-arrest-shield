@@ -1,5 +1,8 @@
 import pickle
 import warnings
+import os
+import tempfile
+from fastapi import UploadFile, File
 import uuid
 from datetime import datetime
 from fastapi import FastAPI
@@ -205,3 +208,140 @@ def get_reports():
         "total"  : len(reports_store),
         "reports": list(reports_store.values())
     }
+
+# ── ADD THESE IMPORTS at the top of main.py ──────────────────
+# Add these to your existing imports:
+#
+# import os
+# import tempfile
+# from fastapi import UploadFile, File
+# import whisper
+#
+# And add this to requirements.txt:
+# openai-whisper
+# ffmpeg-python
+#
+# NOTE: Render needs ffmpeg. Add this to your render build command:
+# apt-get install -y ffmpeg && pip install -r requirements.txt
+# OR add a render.yaml file (see bottom of this file)
+
+# ── /transcribe endpoint — paste this into main.py ───────────
+
+@app.post("/transcribe")
+async def transcribe(file: UploadFile = File(...)):
+    """
+    Accepts an MP3/WAV audio file.
+    Transcribes using Whisper → runs scam detection → returns result.
+    """
+    import os
+    import tempfile
+
+    # Step 1 — Save uploaded file to a temp location
+    suffix = os.path.splitext(file.filename)[1] or ".mp3"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        contents = await file.read()
+        tmp.write(contents)
+        tmp_path = tmp.name
+
+    try:
+        # Step 2 — Load Whisper and transcribe
+        import whisper
+        whisper_model = whisper.load_model("base")
+        result = whisper_model.transcribe(tmp_path)
+        transcribed_text = result["text"].strip()
+        detected_lang = result.get("language", "en")
+
+    except Exception as e:
+        os.unlink(tmp_path)
+        return {
+            "error": f"Transcription failed: {str(e)}",
+            "label": "error",
+            "risk": "UNKNOWN",
+            "score": 0,
+            "transcribed_text": "",
+            "triggered_phrases": [],
+            "advice": "Audio processing failed. Try uploading again."
+        }
+    finally:
+        # Clean up temp file
+        try:
+            os.unlink(tmp_path)
+        except:
+            pass
+
+    # Step 3 — Run scam detection on transcribed text
+    if ML_MODEL is None:
+        return {
+            "error": "Model not loaded",
+            "transcribed_text": transcribed_text,
+            "label": "error",
+            "risk": "UNKNOWN",
+            "score": 0,
+            "triggered_phrases": [],
+            "advice": "Backend model missing."
+        }
+
+    # Translate if needed
+    try:
+        if detected_lang != "en":
+            from deep_translator import GoogleTranslator
+            translated_text = GoogleTranslator(
+                source='auto', target='english'
+            ).translate(transcribed_text)
+        else:
+            translated_text = transcribed_text
+    except:
+        translated_text = transcribed_text
+
+    # Classify
+    clean_text = translated_text.lower()
+    vec        = TFIDF.transform([clean_text])
+    prediction = ML_MODEL.predict(vec)[0]
+    confidence = ML_MODEL.predict_proba(vec)[0][prediction] * 100
+
+    # Triggered phrases
+    triggered = [
+        phrase for phrase in SCAM_PHRASES
+        if phrase in clean_text or phrase in transcribed_text.lower()
+    ]
+
+    # Risk level
+    if prediction == 1 and confidence >= 70:
+        risk = "HIGH"
+    elif prediction == 1 and confidence >= 50:
+        risk = "MEDIUM"
+    elif prediction == 1:
+        risk = "LOW"
+    else:
+        risk = "NONE"
+
+    # Advice
+    if prediction == 1:
+        advice = "Hang up immediately. Do not transfer any money. Call 1930."
+    else:
+        advice = "No threat detected. Stay alert and never share personal details."
+
+    return {
+        "transcribed_text"  : transcribed_text,
+        "translated_text"   : translated_text,
+        "detected_language" : detected_lang,
+        "score"             : round(confidence / 100, 2),
+        "label"             : "scam" if prediction == 1 else "normal",
+        "risk"              : risk,
+        "triggered_phrases" : triggered,
+        "advice"            : advice
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# render.yaml — create this file in your repo root
+# so Render installs ffmpeg automatically
+# ─────────────────────────────────────────────────────────────
+#
+# services:
+#   - type: web
+#     name: digital-arrest-shield
+#     env: python
+#     buildCommand: "apt-get install -y ffmpeg && pip install -r requirements.txt"
+#     startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+#     plan: free
