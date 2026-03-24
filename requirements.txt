@@ -1,6 +1,9 @@
 fastapi
 uvicorn
-requests
-python-dotenv
-twilio
-slowapi
+scikit-learn
+langdetect
+deep-translator
+pydantic
+python-multipart
+numpy
+pandas
