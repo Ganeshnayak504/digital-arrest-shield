@@ -7,3 +7,5 @@ pydantic
 python-multipart
 numpy
 pandas
+openai-whisper
+ffmpeg-python
